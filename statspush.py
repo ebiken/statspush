@@ -1,10 +1,11 @@
 
 import os
 import sys
+import argparse
+import logging
 import re
 import json
 import gzip
-import logging
 import time # timestamp, time
 #from boto3.s3.connection import S3Connection
 #from boto3.s3.key import Key
@@ -90,9 +91,8 @@ def interface_stats():
 
     return ret
 
-def print_stats():
+def print_stats(ifstats):
     """test code to print stats selected"""
-    ifstats = interface_stats()
     # print "debug:", ifstats
     for(iface, stats) in ifstats.items():
         print "Interface: %s" % (iface)
@@ -111,7 +111,7 @@ def print_stats_all():
         for (sname, value) in stats.items():
             print "  %s = %s" % (sname, value)
 
-def statspush(dname, fname):
+def statspush(dname, fname, pformat="", flag_gzip="False",flag_s3="False"):
     """Collect data, format in json, gzip and output
 
     WRITE DETAILS HERE
@@ -126,47 +126,72 @@ def statspush(dname, fname):
     # serialize in json
     ifstats_json = json.dumps(ifstats)
 
-    ## (closing file is not required when using "with")
-    ## write to text file (*.json)
-    filename = dname + "/" + fname
-    with open(filename, 'w') as f:
-        f.write(ifstats_json)
-    # write to gzip file (*.json.gz)
-    filename_gz = dname + "/" + fname + ".gz"
-    with gzip.open(filename_gz, 'wb') as f:
-        f.write(ifstats_json)
+    # write to stdout if flagged
+    if pformat == "cosmetic":
+        print_stats(ifstats)
+    if pformat == "json":
+        print ifstats_json
+
+    # write to gzip file (*.json.gz) or to text file (*.json)
+    # (closing file is not required when using "with")
+    if flag_gzip:
+        filename_gz = dname + "/" + fname + ".gz"
+        with gzip.open(filename_gz, 'wb') as f:
+            f.write(ifstats_json)
+    else:
+        filename = dname + "/" + fname
+        with open(filename, 'w') as f:
+            f.write(ifstats_json)
 
     # send to aws-s3
-
+    if flag_s3:
+        print "debug: send to s3"
+        # TODO
 
 ### main ###
 def main():
-    ## s3dir = argv[1]
-    s3dir = "/home/ebiken/work/statspush/s3/"
-#    s3dir = "aaa.txt"
+    ## parse command line arguments
+    parser = argparse.ArgumentParser(
+        description="Collect stats and push to file or AWS S3. "
+        "File format: stats-YYYYMMDD-hhmmss.json")
+    parser.add_argument("--dir", default="/tmp/statspush/",
+        help="directory name to store files. default=/tmp/statspush/")
+    parser.add_argument("--s3", action="store_true",
+        help="upload to AWS S3")
+    parser.add_argument("--gzip", action="store_true",
+        help="compress using gzip")
+    print_options = ["json", "cosmetic"]
+    parser.add_argument("-p", "--printstats", choices=print_options,
+        help="print stats output to stdout")
+    loglevels = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] 
+    parser.add_argument("--loglevel", type=str, choices=loglevels, default="CRITICAL",
+        help="configure log level. default=CRITICAL")
+    args = parser.parse_args()
 
-    ## set log level from argv
-    # TODO: set log level from argv
-    loglevel = "ERROR"
-    loglevel = "INFO"
-    set_log_level(loglevel)
+    opt_dir     = args.dir
+    #opt_dir    = "/home/ebiken/work/statspush/s3/"
+    opt_s3      = args.s3
+    opt_gzip    = args.gzip
+    opt_print   = args.printstats
+    set_log_level(args.loglevel)
 
-    ## check if s3dir exists. create if not.
-    d = os.path.dirname(s3dir)
+
+    ## check if opt_dir exists. create if not.
+    d = os.path.dirname(opt_dir)
     if d =='':
         logger.error("S3 directory does not exist; terminating.")
         return
     if not os.path.exists(d):
         os.makedirs(d)
 
-    ## set filename: stats-YYYYMMDD-HHMMSS.json
+    ## set filename: stats-YYYYMMDD-hhmmss.json
     #filename = "stats-"+time.strftime('%Y%m%d-%H%M%S')+".json" 
     filename = "stats-"+time.strftime('%Y%m%d-%H%M%S')+".json" 
-    statspush(s3dir, filename)
+
+    statspush(opt_dir, filename,
+        pformat = opt_print, flag_gzip = opt_gzip, flag_s3 = opt_s3)
     logger.info("pushed %s" % filename)
 
-    ## s3label? = argv[2]
-    ##  -> make these as options ex: "-s3 <s3dir> -s3label <s3label>"
 
 if __name__ == '__main__':
     main()
