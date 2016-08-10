@@ -7,9 +7,8 @@ import re
 import json
 import gzip
 import time # timestamp, time
-#from boto3.s3.connection import S3Connection
-#from boto3.s3.key import Key
-
+import boto3
+import botocore
 
 ### define logger here so it can be accessed from any place in this module.
 ## Logger should be replaced to use config file (logging.config) as described below.
@@ -29,8 +28,6 @@ def set_log_level(level):
     loglevel = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
     if level not in loglevel:
         return
-    # ch = logging.StreamHandler()
-    # TODO: add code to select Handler.
     logger.debug("setting log level")
     if level == "DEBUG":
         ch.setLevel(logging.DEBUG)
@@ -111,42 +108,77 @@ def print_stats_all():
         for (sname, value) in stats.items():
             print "  %s = %s" % (sname, value)
 
-def statspush(dname, fname, pformat="", flag_gzip="False",flag_s3="False"):
+### DEFINITION OF FLAGS
+FLAGS_S3    = "s3" 
+FLAGS_GZIP  = "gzip"
+
+def statspush(dname, fname, flags, s3bucket="statspush", pformat=""):
     """Collect data, format in json, gzip and output
 
-    WRITE DETAILS HERE
+    dname: directory name to store file.
+    fname: name of the file to write stats to.
+    pformat: format when printing to stdout.
+        human: human friendly
+        json: json format
+    flags:
+        FLAGS_S3: push file to AWS S3
+        FLAGS_GZIP: compress file using gzip
     """
-    ## debug: print stats
-    # print_stats_all()
-    # print_stats()
+    ## check if dname exists and write accessible. create if it didn't exist.
+    check_create_dir(dname)
     
     # collect data
+    # TODO: add delta stats
     ifstats = interface_stats()
-
+    
     # serialize in json
     ifstats_json = json.dumps(ifstats)
+    fname = fname + ".json"
+    logger.debug("fname in json = %s" % fname)
 
     # write to stdout if flagged
-    if pformat == "cosmetic":
+    if pformat == "human":
         print_stats(ifstats)
     if pformat == "json":
         print ifstats_json
 
     # write to gzip file (*.json.gz) or to text file (*.json)
     # (closing file is not required when using "with")
-    if flag_gzip:
-        filename_gz = dname + "/" + fname + ".gz"
-        with gzip.open(filename_gz, 'wb') as f:
+    if FLAGS_GZIP in flags:
+        fname = fname + ".gz"
+        filename = dname + "/" + fname
+        with gzip.open(filename, 'wb') as f:
             f.write(ifstats_json)
     else:
         filename = dname + "/" + fname
         with open(filename, 'w') as f:
             f.write(ifstats_json)
+    logger.debug("Written stats to filename: %s" % filename)
 
-    # send to aws-s3
-    if flag_s3:
-        print "debug: send to s3"
-        # TODO
+    # push file to AWS S3
+    if FLAGS_S3 in flags:
+        s3 = boto3.client('s3')
+        s3.upload_file(filename, s3bucket, fname)
+        logger.debug("Pushed file to AWS S3.")
+
+def check_create_dir(opt_dir):
+    if os.path.isdir(opt_dir):
+        if os.access(opt_dir, os.W_OK):
+            logger.debug("Directory exists and write accessible: %s" % opt_dir)
+        else:
+            logger.critical("Did not have write access: %s" % opt_dir)
+            exit()
+    else:
+        # return if opt_dir was file.
+        if os.path.isfile(opt_dir):
+            logger.critical("Not directory but file: %s" % opt_dir)
+            exit()
+        # create if opt_dir doesn't exist.
+        try:
+            os.makedirs(opt_dir)
+        except OSError:
+            logger.critical("Could not create directory: %s" % opt_dir)
+            raise
 
 ### main ###
 def main():
@@ -154,46 +186,45 @@ def main():
     parser = argparse.ArgumentParser(
         description="Collect stats and push to file or AWS S3. "
         "File format: stats-YYYYMMDD-hhmmss.json")
-    parser.add_argument("--dir", default="/tmp/statspush/",
+    # values
+    parser.add_argument("-d", "--dir", default="/tmp/statspush/",
         help="directory name to store files. default=/tmp/statspush/")
-    parser.add_argument("--s3", action="store_true",
-        help="upload to AWS S3")
-    parser.add_argument("--gzip", action="store_true",
-        help="compress using gzip")
-    print_options = ["json", "cosmetic"]
+    parser.add_argument("--s3bucket", default="statspush",
+        help="AWS S3 bucket name to store files. default=statspush")
+    print_options = ["json", "human"]
     parser.add_argument("-p", "--printstats", choices=print_options,
         help="print stats output to stdout")
     loglevels = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] 
     parser.add_argument("--loglevel", type=str, choices=loglevels, default="CRITICAL",
         help="configure log level. default=CRITICAL")
+    # flags
+    parser.add_argument("--s3", action="store_true",
+        help="upload to AWS S3")
+    parser.add_argument("--gzip", action="store_true",
+        help="compress using gzip")
+
     args = parser.parse_args()
-
-    opt_dir     = args.dir
-    #opt_dir    = "/home/ebiken/work/statspush/s3/"
-    opt_s3      = args.s3
-    opt_gzip    = args.gzip
+    set_log_level(args.loglevel)    # log level must be set first.
+    # values
+    opt_dir     = os.path.abspath(args.dir)
+    logger.debug("os.path.abspath(args.dir): %s" % opt_dir)
+    opt_s3bucket = args.s3bucket
     opt_print   = args.printstats
-    set_log_level(args.loglevel)
-
-
-    ## check if opt_dir exists. create if not.
-    d = os.path.dirname(opt_dir)
-    if d =='':
-        logger.error("S3 directory does not exist; terminating.")
-        return
-    if not os.path.exists(d):
-        os.makedirs(d)
+    # flags
+    flags = []
+    if args.s3:
+        flags.append(FLAGS_S3)
+    if args.gzip:
+        flags.append(FLAGS_GZIP)
+    logger.debug("flags = %s" % flags)
 
     ## set filename: stats-YYYYMMDD-hhmmss.json
-    #filename = "stats-"+time.strftime('%Y%m%d-%H%M%S')+".json" 
-    filename = "stats-"+time.strftime('%Y%m%d-%H%M%S')+".json" 
+    filename = "stats-"+time.strftime('%Y%m%d-%H%M%S')
 
-    statspush(opt_dir, filename,
-        pformat = opt_print, flag_gzip = opt_gzip, flag_s3 = opt_s3)
+    statspush(opt_dir, filename, flags, opt_s3bucket, pformat = opt_print)
     logger.info("pushed %s" % filename)
 
 
 if __name__ == '__main__':
     main()
-
 

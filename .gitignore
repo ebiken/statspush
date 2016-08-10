@@ -1,2 +1,3 @@
 # ignore files under s3 directory
 /s3/
+/tmp/
