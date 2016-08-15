@@ -9,6 +9,7 @@ import gzip
 import time # timestamp, time
 import boto3
 import botocore
+import urllib2
 
 ### define logger here so it can be accessed from any place in this module.
 ## Logger should be replaced to use config file (logging.config) as described below.
@@ -88,6 +89,28 @@ def interface_stats():
 
     return ret
 
+def get_iflist():
+    """Wrapper to get list of network interfaces on Linux"""
+    return os.listdir("/sys/class/net/")
+
+def interface_stats_zebra():
+    """Collect insterface stats from zebra REST interface.
+    Add timestamp and interface name to the return data.
+    Only works while openconfigd and zebra/ribd are running.
+    """
+    ret = {}    # create empty dict used as return value
+    timestamp = int(time.time())
+
+    iflist = get_iflist()
+    for ifname in iflist:
+        # GET data from zebra/ribd REST interface
+        data = json.load(urllib2.urlopen("http://localhost:3000/interfaces/interfaces-state/%s/statistics" % ifname))
+        data["timestamp"] = timestamp
+        ret[ifname] = data
+
+    return ret
+
+
 def print_stats(ifstats):
     """test code to print stats selected"""
     # print "debug:", ifstats
@@ -111,6 +134,7 @@ def print_stats_all():
 ### DEFINITION OF FLAGS
 FLAGS_S3    = "s3" 
 FLAGS_GZIP  = "gzip"
+FLAGS_ZEBRA = "zebra"
 
 def statspush(dname, fname, flags, s3bucket="statspush", pformat=""):
     """Collect data, format in json, gzip and output
@@ -118,7 +142,6 @@ def statspush(dname, fname, flags, s3bucket="statspush", pformat=""):
     dname: directory name to store file.
     fname: name of the file to write stats to.
     pformat: format when printing to stdout.
-        human: human friendly
         json: json format
     flags:
         FLAGS_S3: push file to AWS S3
@@ -129,7 +152,10 @@ def statspush(dname, fname, flags, s3bucket="statspush", pformat=""):
     
     # collect data
     # TODO: add delta stats
-    ifstats = interface_stats()
+    if FLAGS_ZEBRA in flags:
+        ifstats = interface_stats_zebra()
+    else:
+        ifstats = interface_stats()
     
     # serialize in json
     ifstats_json = json.dumps(ifstats)
@@ -137,8 +163,6 @@ def statspush(dname, fname, flags, s3bucket="statspush", pformat=""):
     logger.debug("fname in json = %s" % fname)
 
     # write to stdout if flagged
-    if pformat == "human":
-        print_stats(ifstats)
     if pformat == "json":
         print ifstats_json
 
@@ -191,7 +215,7 @@ def main():
         help="directory name to store files. default=/tmp/statspush/")
     parser.add_argument("--s3bucket", default="statspush",
         help="AWS S3 bucket name to store files. default=statspush")
-    print_options = ["json", "human"]
+    print_options = ["json"]
     parser.add_argument("-p", "--printstats", choices=print_options,
         help="print stats output to stdout")
     loglevels = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] 
@@ -202,6 +226,8 @@ def main():
         help="upload to AWS S3")
     parser.add_argument("--gzip", action="store_true",
         help="compress using gzip")
+    parser.add_argument("--zebra", action="store_true",
+        help="get data from zebra REST interface")
 
     args = parser.parse_args()
     set_log_level(args.loglevel)    # log level must be set first.
@@ -216,6 +242,8 @@ def main():
         flags.append(FLAGS_S3)
     if args.gzip:
         flags.append(FLAGS_GZIP)
+    if args.zebra:
+        flags.append(FLAGS_ZEBRA)
     logger.debug("flags = %s" % flags)
 
     ## set filename: stats-YYYYMMDD-hhmmss.json
